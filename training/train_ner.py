@@ -1,3 +1,4 @@
+
 # BioBERT NER fine-tuning (CoNLL-style) with optional PEFT/LoRA adapters.
 # Usage (CPU okay for tiny samples; use GPU on Colab/Studio Lab for real runs):
 #   python training/train_ner.py --model dmis-lab/biobert-v1.1 --train data/train.conll --valid data/dev.conll --use_lora
@@ -7,6 +8,7 @@ from datasets import Dataset
 from transformers import (AutoTokenizer, AutoModelForTokenClassification, DataCollatorForTokenClassification,
                           TrainingArguments, Trainer)
 import evaluate
+import sys
 
 try:
     from peft import LoraConfig, get_peft_model
@@ -51,23 +53,27 @@ def align_labels_with_tokens(labels, word_ids):
     return new_labels
 
 def compute_metrics(p):
-    preds, refs = p
+    # Correctly unpack predictions and labels from EvalPrediction object
+    preds, refs = p.predictions, p.label_ids
     preds = np.argmax(preds, axis=-1)
     true_preds, true_labels = [], []
-    for pred, label, attention in zip(preds, p.label_ids, p.inputs["attention_mask"]):
+    # Modify to iterate only over preds and labels, relying on -100 for alignment
+    for pred, label in zip(preds, p.label_ids):
         # align
         pred_tags, label_tags = [], []
         for p_i, l_i in zip(pred, label):
-            if l_i != -100:
+            if l_i != -100: # Use -100 label to filter tokens
                 pred_tags.append(id2label[p_i])
                 label_tags.append(id2label[l_i])
         true_preds.append(pred_tags); true_labels.append(label_tags)
+
     metric = evaluate.load("seqeval")
     results = metric.compute(predictions=true_preds, references=true_labels)
     return {"precision": results["overall_precision"],
             "recall": results["overall_recall"],
             "f1": results["overall_f1"],
             "accuracy": results["overall_accuracy"]}
+
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
@@ -78,7 +84,11 @@ if __name__ == "__main__":
     ap.add_argument("--epochs", type=int, default=1)
     ap.add_argument("--batch", type=int, default=8)
     ap.add_argument("--use_lora", action="store_true")
-    args = ap.parse_args()
+
+    # Parse known arguments and ignore unknown ones
+    args, unknown = ap.parse_known_args()
+    # If running in Colab notebook, unknown arguments like -f will be passed
+    # and we can safely ignore them.
 
     train_tokens, train_tags = read_conll(args.train)
     valid_tokens, valid_tags = read_conll(args.valid)
@@ -120,10 +130,11 @@ if __name__ == "__main__":
         per_device_eval_batch_size=args.batch,
         num_train_epochs=args.epochs,
         weight_decay=0.01,
-        evaluation_strategy="epoch",
+        eval_strategy="epoch", # Changed from evaluation_strategy
         save_strategy="epoch",
         logging_steps=50,
         report_to=[],
+        include_inputs_for_metrics=True, # Added to include attention_mask in compute_metrics
     )
     trainer = Trainer(
         model=model,
